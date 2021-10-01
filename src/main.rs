@@ -8,8 +8,20 @@ fn main() {
     nannou::app(model).update(update).simple_window(view).run();
 }
 
+enum CellState {
+    Enabled,
+    Disabled,
+    Static,
+}
+
+struct Cell {
+    rect: Rect,
+    enabled: bool,
+    // state: CellState,
+}
+
 struct Model {
-    field: Vec<(Rect, bool)>,
+    field: Vec<Cell>,
     window: Rect,
     initialized: bool,
 }
@@ -39,12 +51,12 @@ fn view(app: &App, model: &Model, frame: Frame) {
 
     draw.background().color(STEELBLUE);
 
-    for (rect, selected) in model.field.iter() {
+    model.field.iter().for_each(|cell| {
         draw.rect()
-            .xy(rect.xy())
-            .wh(rect.wh())
-            .color(if *selected { WHITE } else { BLACK });
-    }
+            .xy(cell.rect.xy())
+            .wh(cell.rect.wh())
+            .color(if cell.enabled { WHITE } else { BLACK });
+    });
 
     draw.to_frame(app, &frame).unwrap();
 }
@@ -66,9 +78,9 @@ fn mover(app: &App, model: &mut Model) {
 }
 
 fn rain(_app: &App, model: &mut Model) {
-    let selected = get_selected_indexes(&model.field);
+    let selected = get_enabled_cells_indexes(&model.field);
 
-    clear_selection(&mut model.field);
+    clear_field(&mut model.field);
 
     // add new drop
     if selected.len() < (SIZE * 2) as usize {
@@ -121,52 +133,61 @@ fn life(app: &App, model: &mut Model) {
 }
 
 // utils
-fn init_recs(window_rect: Rect, old_field: Option<&Vec<(Rect, bool)>>) -> Vec<(Rect, bool)> {
-    let mut field: Vec<(Rect, bool)> = vec![];
+fn init_recs(window_rect: Rect, old_field: Option<&Vec<Cell>>) -> Vec<Cell> {
+    let mut field: Vec<Cell> = vec![];
     let (side, zone) = get_rect_side_and_zone(window_rect);
 
     for i in 0..SIZE * SIZE {
         let (x, y) = index_to_pos(i as isize);
-        let shifted_rect = Rect::from_x_y_w_h(0.0, 0.0, side, side)
+
+        let rect = Rect::from_x_y_w_h(0.0, 0.0, side, side)
             .top_left_of(window_rect)
             .shift_x(x as f32 * zone)
             .shift_y(y as f32 * -zone);
 
-        if let Some(f) = old_field {
-            field.push((shifted_rect, f[i as usize].1))
+        let enabled = if let Some(f) = old_field {
+            f[i as usize].enabled
         } else {
-            field.push((shifted_rect, false))
-        }
+            false
+        };
+
+        let state = CellState::Enabled;
+
+        field.push(Cell {
+            rect,
+            enabled,
+            // state,
+        });
     }
 
     field
 }
 
-fn get_selected_indexes(rects: &[(Rect, bool)]) -> Vec<isize> {
+fn get_enabled_cells_indexes(rects: &[Cell]) -> Vec<isize> {
     rects
         .iter()
         .enumerate()
-        .filter(|&(_, v)| v.1)
+        .filter(|&(_, v)| v.enabled)
         .map(|(i, _)| i as isize)
         .collect()
 }
 
-fn get_cells_by_state(rects: &[(Rect, bool)], state: bool) -> Vec<(isize, isize)> {
+fn get_cells_by_state(rects: &[Cell], state: bool) -> Vec<(isize, isize)> {
     rects
         .iter()
         .enumerate()
-        .filter(|&(_, v)| v.1 == state)
+        .filter(|&(_, v)| v.enabled == state)
         .map(|(i, _)| index_to_pos(i as isize))
         .collect()
 }
 
-fn set_cells_state(rects: &mut Vec<(Rect, bool)>, positions: Vec<(isize, isize)>, state: bool) {
+fn set_cells_state(rects: &mut Vec<Cell>, positions: Vec<(isize, isize)>, state: bool) {
     for (x, y) in positions.iter() {
         set_cell_state(rects, *x, *y, state)
     }
 }
 
-fn get_cell_neighbours_states(rects: &[(Rect, bool)], x: isize, y: isize) -> Vec<Option<bool>> {
+fn get_cell_neighbours_states(rects: &[Cell], x: isize, y: isize) -> Vec<Option<bool>> {
     let mut result: Vec<Option<bool>> = vec![];
 
     result.push(get_cell_state(rects, x - 1, y - 1)); // top left
@@ -183,7 +204,7 @@ fn get_cell_neighbours_states(rects: &[(Rect, bool)], x: isize, y: isize) -> Vec
     result
 }
 
-fn get_cell_state(rects: &[(Rect, bool)], x: isize, y: isize) -> Option<bool> {
+fn get_cell_state(rects: &[Cell], x: isize, y: isize) -> Option<bool> {
     if x < 0 || y < 0 {
         return None;
     }
@@ -193,19 +214,22 @@ fn get_cell_state(rects: &[(Rect, bool)], x: isize, y: isize) -> Option<bool> {
     }
 
     let index = pos_to_index((x, y)) as isize;
-    Some(rects[index as usize].1)
+    Some(rects[index as usize].enabled)
 }
 
-fn clear_selection(rects: &mut Vec<(Rect, bool)>) {
-    let indexes = get_selected_indexes(rects);
+fn clear_field(rects: &mut Vec<Cell>) {
+    let indexes = get_enabled_cells_indexes(rects);
     for index in indexes {
-        rects[index as usize].1 = false
+        rects[index as usize].enabled = false
     }
 }
 
-fn set_cell_state(rects: &mut Vec<(Rect, bool)>, x: isize, y: isize, state: bool) {
+fn set_cell_state(rects: &mut Vec<Cell>, x: isize, y: isize, state: bool) {
     let index = pos_to_index((x, y)) as usize;
-    rects[index] = (rects[index].0, state);
+    rects[index] = Cell {
+        rect: rects[index].rect,
+        enabled: state,
+    };
 }
 
 // INFO: 4 fps
