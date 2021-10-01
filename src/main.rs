@@ -8,16 +8,47 @@ fn main() {
     nannou::app(model).update(update).simple_window(view).run();
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum CellState {
     Enabled,
     Disabled,
-    Static,
 }
 
+impl CellState {
+    fn get_color(&self) -> Srgb<u8> {
+        match self {
+            Self::Enabled => WHITE,
+            Self::Disabled => BLACK,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 struct Cell {
     rect: Rect,
-    enabled: bool,
-    // state: CellState,
+    state: CellState,
+    marked: bool,
+}
+
+impl Cell {
+    fn draw(&self, draw: &Draw) {
+        let rect = self.rect;
+
+        draw.rect()
+            .xy(rect.xy())
+            .wh(rect.wh())
+            .color(self.state.get_color());
+
+        if self.marked {
+            let pad = rect.h() * 0.2;
+            let rect2 = rect
+                .pad_left(pad)
+                .pad_right(pad)
+                .pad_top(pad)
+                .pad_bottom(pad);
+            draw.rect().xy(rect2.xy()).wh(rect2.wh()).color(YELLOW);
+        }
+    }
 }
 
 struct Model {
@@ -41,9 +72,9 @@ fn update(app: &App, model: &mut Model, _update: Update) {
         model.field = init_recs(wr, Some(&model.field));
     }
 
-    // mover(app, model);
+    mover(app, model);
     // rain(app, model);
-    life(app, model);
+    // life(app, model);
 }
 
 fn view(app: &App, model: &Model, frame: Frame) {
@@ -51,12 +82,7 @@ fn view(app: &App, model: &Model, frame: Frame) {
 
     draw.background().color(STEELBLUE);
 
-    model.field.iter().for_each(|cell| {
-        draw.rect()
-            .xy(cell.rect.xy())
-            .wh(cell.rect.wh())
-            .color(if cell.enabled { WHITE } else { BLACK });
-    });
+    model.field.iter().for_each(|cell| cell.draw(&draw.clone()));
 
     draw.to_frame(app, &frame).unwrap();
 }
@@ -64,7 +90,8 @@ fn view(app: &App, model: &Model, frame: Frame) {
 // simulations
 fn mover(app: &App, model: &mut Model) {
     if !model.initialized {
-        set_cell_state(&mut model.field, 0, 0, true);
+        set_cell_params(&mut model.field, 0, 0, Some(CellState::Enabled), None);
+        put_markers(&mut model.field);
         model.initialized = true;
     }
 
@@ -73,27 +100,42 @@ fn mover(app: &App, model: &mut Model) {
     if px == x && py == y {
         return;
     }
-    set_cell_state(&mut model.field, px, py, false);
-    set_cell_state(&mut model.field, x, y, true)
+    set_cell_params(&mut model.field, px, py, Some(CellState::Disabled), None);
+    set_cell_params(&mut model.field, x, y, Some(CellState::Enabled), None);
 }
 
 fn rain(_app: &App, model: &mut Model) {
-    let selected = get_enabled_cells_indexes(&model.field);
+    if !model.initialized {
+        put_markers(&mut model.field);
+        model.initialized = true;
+    }
+
+    let enabled_indexes = get_enabled_cells_indexes(&model.field);
 
     clear_field(&mut model.field);
 
     // add new drop
-    if selected.len() < (SIZE * 2) as usize {
+    if enabled_indexes.len() < (SIZE * 2) as usize {
         let x = random_range(0, SIZE);
-        set_cell_state(&mut model.field, x, 0, true);
+        set_cell_params(&mut model.field, x, 0, Some(CellState::Enabled), None);
     }
 
     // fall old drops
-    for index in selected {
+    for index in enabled_indexes {
         let (x, y) = index_to_pos(index);
         if y + 1 < SIZE {
-            set_cell_state(&mut model.field, x, y + 1, true)
+            set_cell_params(&mut model.field, x, y + 1, Some(CellState::Enabled), None)
         }
+    }
+}
+
+fn _is_alive(cell: &Option<Cell>) -> bool {
+    match cell {
+        Some(c) => match c.state {
+            CellState::Enabled => true,
+            CellState::Disabled => false,
+        },
+        None => false,
     }
 }
 
@@ -103,32 +145,34 @@ fn life(app: &App, model: &mut Model) {
         for _ in 0..SIZE * SIZE / 2 {
             let x = random_range(0, SIZE);
             let y = random_range(0, SIZE);
-            set_cell_state(&mut model.field, x, y, true)
+            set_cell_params(&mut model.field, x, y, Some(CellState::Enabled), None);
         }
+        put_markers(&mut model.field);
         model.initialized = true;
     }
 
-    let mut next_field = init_recs(model.window, None);
+    let mut next_field = init_recs(model.window, Some(&model.field));
+
     for x in 0..SIZE {
         for y in 0..SIZE {
-            let is_alive = get_cell_state(&model.field, x, y).unwrap();
-            let neigbours = get_cell_neighbours_states(&model.field, x, y);
-            let alive_neighbours = neigbours
-                .iter()
-                .filter(|&v| v.is_some() && v.unwrap())
-                .count();
+            let cell = get_cell(&model.field, x, y);
+
+            let is_alive = _is_alive(&cell);
+            let neigbours_cells = get_neighbours_cells(&model.field, x, y);
+            let alive_neighbours = neigbours_cells.iter().filter(|&c| _is_alive(c)).count();
 
             if is_alive {
                 match alive_neighbours {
-                    1 => set_cell_state(&mut next_field, x, y, false),
-                    2 | 3 => set_cell_state(&mut next_field, x, y, true),
-                    _ => set_cell_state(&mut next_field, x, y, false),
+                    1 => set_cell_params(&mut next_field, x, y, Some(CellState::Disabled), None),
+                    2 | 3 => set_cell_params(&mut next_field, x, y, Some(CellState::Enabled), None),
+                    _ => set_cell_params(&mut next_field, x, y, Some(CellState::Disabled), None),
                 }
             } else if alive_neighbours == 3 {
-                set_cell_state(&mut next_field, x, y, true)
+                set_cell_params(&mut next_field, x, y, Some(CellState::Enabled), None)
             }
         }
     }
+
     model.field = next_field;
 }
 
@@ -145,66 +189,85 @@ fn init_recs(window_rect: Rect, old_field: Option<&Vec<Cell>>) -> Vec<Cell> {
             .shift_x(x as f32 * zone)
             .shift_y(y as f32 * -zone);
 
-        let enabled = if let Some(f) = old_field {
-            f[i as usize].enabled
+        let state = if let Some(f) = old_field {
+            f[i as usize].state
+        } else {
+            CellState::Disabled
+        };
+
+        let marked = if let Some(f) = old_field {
+            f[i as usize].marked
         } else {
             false
         };
 
-        let state = CellState::Enabled;
-
         field.push(Cell {
             rect,
-            enabled,
-            // state,
+            state,
+            marked,
         });
     }
 
     field
 }
 
+fn put_markers(rects: &mut Vec<Cell>) {
+    let marked_count = SIZE * SIZE / 8;
+
+    for _ in 0..marked_count {
+        let x = random_range(0, SIZE);
+        let y = random_range(0, SIZE);
+        rects[pos_to_index((x, y)) as usize].marked = true;
+    }
+}
+
 fn get_enabled_cells_indexes(rects: &[Cell]) -> Vec<isize> {
     rects
         .iter()
         .enumerate()
-        .filter(|&(_, v)| v.enabled)
+        .filter(|&(_, c)| _is_alive(&Some(*c)))
         .map(|(i, _)| i as isize)
         .collect()
 }
 
-fn get_cells_by_state(rects: &[Cell], state: bool) -> Vec<(isize, isize)> {
+fn get_cells_by_state(rects: &[Cell], state: CellState) -> Vec<(isize, isize)> {
     rects
         .iter()
         .enumerate()
-        .filter(|&(_, v)| v.enabled == state)
+        .filter(|&(_, v)| v.state == state)
         .map(|(i, _)| index_to_pos(i as isize))
         .collect()
 }
 
-fn set_cells_state(rects: &mut Vec<Cell>, positions: Vec<(isize, isize)>, state: bool) {
+fn set_cells_params(
+    rects: &mut Vec<Cell>,
+    positions: Vec<(isize, isize)>,
+    state: Option<CellState>,
+    marked: Option<bool>,
+) {
     for (x, y) in positions.iter() {
-        set_cell_state(rects, *x, *y, state)
+        set_cell_params(rects, *x, *y, state, marked)
     }
 }
 
-fn get_cell_neighbours_states(rects: &[Cell], x: isize, y: isize) -> Vec<Option<bool>> {
-    let mut result: Vec<Option<bool>> = vec![];
+fn get_neighbours_cells(rects: &[Cell], x: isize, y: isize) -> Vec<Option<Cell>> {
+    let mut result: Vec<Option<Cell>> = vec![];
 
-    result.push(get_cell_state(rects, x - 1, y - 1)); // top left
-    result.push(get_cell_state(rects, x, y - 1)); // top
-    result.push(get_cell_state(rects, x + 1, y - 1)); // top right
+    result.push(get_cell(rects, x - 1, y - 1)); // top left
+    result.push(get_cell(rects, x, y - 1)); // top
+    result.push(get_cell(rects, x + 1, y - 1)); // top right
 
-    result.push(get_cell_state(rects, x - 1, y)); // left
-    result.push(get_cell_state(rects, x + 1, y)); // right
+    result.push(get_cell(rects, x - 1, y)); // left
+    result.push(get_cell(rects, x + 1, y)); // right
 
-    result.push(get_cell_state(rects, x - 1, y + 1)); // bottom left
-    result.push(get_cell_state(rects, x, y + 1)); // bottom
-    result.push(get_cell_state(rects, x + 1, y + 1)); // bottom right
+    result.push(get_cell(rects, x - 1, y + 1)); // bottom left
+    result.push(get_cell(rects, x, y + 1)); // bottom
+    result.push(get_cell(rects, x + 1, y + 1)); // bottom right
 
     result
 }
 
-fn get_cell_state(rects: &[Cell], x: isize, y: isize) -> Option<bool> {
+fn get_cell(rects: &[Cell], x: isize, y: isize) -> Option<Cell> {
     if x < 0 || y < 0 {
         return None;
     }
@@ -214,21 +277,39 @@ fn get_cell_state(rects: &[Cell], x: isize, y: isize) -> Option<bool> {
     }
 
     let index = pos_to_index((x, y)) as isize;
-    Some(rects[index as usize].enabled)
+    Some(rects[index as usize])
 }
 
 fn clear_field(rects: &mut Vec<Cell>) {
     let indexes = get_enabled_cells_indexes(rects);
     for index in indexes {
-        rects[index as usize].enabled = false
+        rects[index as usize].state = CellState::Disabled;
     }
 }
 
-fn set_cell_state(rects: &mut Vec<Cell>, x: isize, y: isize, state: bool) {
+fn set_cell_params(
+    rects: &mut Vec<Cell>,
+    x: isize,
+    y: isize,
+    state: Option<CellState>,
+    marked: Option<bool>,
+) {
     let index = pos_to_index((x, y)) as usize;
+    let cell = rects[index];
+    let rect = rects[index].rect;
+    let new_state = match state {
+        Some(s) => s,
+        None => cell.state,
+    };
+    let new_marked = match marked {
+        Some(m) => m,
+        None => cell.marked,
+    };
+
     rects[index] = Cell {
-        rect: rects[index].rect,
-        enabled: state,
+        rect,
+        state: new_state,
+        marked: new_marked,
     };
 }
 
