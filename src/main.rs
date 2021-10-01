@@ -72,9 +72,9 @@ fn update(app: &App, model: &mut Model, _update: Update) {
         model.field = init_recs(wr, Some(&model.field));
     }
 
-    mover(app, model);
+    // mover(app, model);
     // rain(app, model);
-    // life(app, model);
+    life(app, model);
 }
 
 fn view(app: &App, model: &Model, frame: Frame) {
@@ -189,23 +189,18 @@ fn init_recs(window_rect: Rect, old_field: Option<&Vec<Cell>>) -> Vec<Cell> {
             .shift_x(x as f32 * zone)
             .shift_y(y as f32 * -zone);
 
-        let state = if let Some(f) = old_field {
-            f[i as usize].state
+        if let Some(cell) = old_field
+            .and_then(|o| get_cell(o, x, y))
+            .map(|c| Cell { rect, ..c })
+        {
+            field.push(cell);
         } else {
-            CellState::Disabled
+            field.push(Cell {
+                rect,
+                state: CellState::Disabled,
+                marked: false,
+            });
         };
-
-        let marked = if let Some(f) = old_field {
-            f[i as usize].marked
-        } else {
-            false
-        };
-
-        field.push(Cell {
-            rect,
-            state,
-            marked,
-        });
     }
 
     field
