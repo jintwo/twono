@@ -1,16 +1,32 @@
-use std::time::Duration;
-
+use nannou::geom::Rect;
 use nannou::prelude::*;
 use nannou::rand::random_range;
 use nannou::ui::prelude::*;
-use nannou::{color::chromatic_adaptation::AdaptInto, geom::Rect};
 use nannou_osc as osc;
 use nannou_osc::Type;
+use std::fmt;
 
 const SIZE: isize = 32;
+const HEIGHT: u32 = SIZE as u32 * 2 * 10;
+const WIDTH: u32 = SIZE as u32 * 2 * 10;
+
+static SIMULATIONS: &[Simulation] = &[Simulation::Mover, Simulation::Rain, Simulation::Life];
 
 fn main() {
-    nannou::app(model).update(update).simple_window(view).run();
+    nannou::app(model).update(update).run();
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Simulation {
+    Mover,
+    Rain,
+    Life,
+}
+
+impl fmt::Display for Simulation {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -56,71 +72,183 @@ impl Cell {
     }
 }
 
+widget_ids! {
+    struct Ids {
+        title_label,
+        restart_btn,
+        reseed_btn,
+        simulation_label,
+        simulation_combo,
+    }
+}
+
 struct Model {
     field: Vec<Cell>,
-    window: Rect,
     initialized: bool,
     sender: osc::Sender<osc::Connected>,
-    last_send: Option<f64>,
+    main_window: WindowId,
+    main_window_rect: Rect,
+    text: String,
+    ids: Ids,
+    ui: Ui,
+    simulation: Simulation,
 }
 
 fn model(app: &App) -> Model {
-    Model {
+    let main_window = app
+        .new_window()
+        .title(app.exe_name().unwrap())
+        .size(WIDTH, HEIGHT)
+        .view(view)
+        .build()
+        .unwrap();
+
+    let ui_window = app
+        .new_window()
+        .title(app.exe_name().unwrap() + " controls")
+        .size(300, 200)
+        .view(ui_view)
+        .event(ui_event)
+        .build()
+        .unwrap();
+
+    let mut ui = app.new_ui().window(ui_window).build().unwrap();
+    let ids = Ids::new(ui.widget_id_generator());
+
+    ui.clear_with(color::DARK_CHARCOAL);
+    let mut theme = ui.theme_mut();
+    theme.label_color = color::WHITE;
+    theme.shape_color = color::CHARCOAL;
+
+    let main_window_rect = app.window(main_window).unwrap().rect();
+
+    let mut model = Model {
         field: init_recs(app.window_rect(), None),
-        window: app.window_rect(),
         initialized: false,
         sender: osc::sender()
             .unwrap()
             .connect("192.168.0.107:9001")
             .unwrap(),
-        last_send: None,
+        main_window: main_window,
+        main_window_rect: main_window_rect,
+        ids: ids,
+        ui: ui,
+        text: "".to_string(),
+        simulation: Simulation::Life,
+    };
+
+    ui_event(&app, &mut model, WindowEvent::Focused);
+
+    seed(&mut model.field);
+
+    model
+}
+
+fn ui_view(app: &App, model: &Model, frame: Frame) {
+    model.ui.draw_to_frame(app, &frame).unwrap();
+}
+
+fn ui_event(_app: &App, model: &mut Model, _event: WindowEvent) {
+    let ui = &mut model.ui.set_widgets();
+
+    // Control panel title
+    widget::Text::new("Controls")
+        .top_left_with_margin(15.0)
+        .w_h(100.0, 24.0)
+        .font_size(16)
+        .set(model.ids.title_label, ui);
+
+    // for event in widget::TextEdit::new(&model.text)
+    //     .top_left_with_margin(10.0)
+    //     .w_h(300.0, 40.0)
+    //     .font_size(24)
+    //     .set(model.ids.title, ui)
+    // {
+    //     model.text = event.clone();
+    // }
+
+    // Restart
+    for _click in widget::Button::new()
+        .down_from(model.ids.title_label, 12.0)
+        .w_h(100.0, 28.0)
+        .label("Restart")
+        .set(model.ids.restart_btn, ui)
+    {
+        model.initialized = false;
+    }
+
+    for _click in widget::Button::new()
+        .right_from(model.ids.restart_btn, 12.0)
+        .w_h(100.0, 28.0)
+        .label("Reseed")
+        .set(model.ids.reseed_btn, ui)
+    {
+        seed(&mut model.field);
+    }
+
+    widget::Text::new("Simulation")
+        .down_from(model.ids.restart_btn, 12.0)
+        .w_h(100.0, 24.0)
+        .font_size(16)
+        .set(model.ids.simulation_label, ui);
+
+    let current_sim = &model.simulation;
+
+    for event in widget::DropDownList::new(
+        SIMULATIONS
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<String>>()
+            .as_slice(),
+        SIMULATIONS
+            .iter()
+            .enumerate()
+            .find(|&(i, e)| *e == *current_sim)
+            .map(|(i, e)| i),
+    )
+    .right_from(model.ids.simulation_label, 12.0)
+    .w_h(100.0, 28.0)
+    .label_font_size(16)
+    .set(model.ids.simulation_combo, ui)
+    {
+        model.simulation = SIMULATIONS[event];
     }
 }
 
 fn update(app: &App, model: &mut Model, _update: Update) {
-    let wr = app.window_rect();
-    if !wr.eq(&model.window) {
-        model.window = wr;
-        model.field = init_recs(wr, Some(&model.field));
+    let window_rect = app.window(model.main_window).unwrap().rect();
+    if !window_rect.eq(&model.main_window_rect) {
+        model.main_window_rect = window_rect;
+        model.field = init_recs(window_rect, Some(&model.field));
     }
 
-    // mover(app, model);
-    // rain(app, model);
-    life(app, model);
+    match model.simulation {
+        Simulation::Rain => rain(app, model),
+        Simulation::Mover => mover(app, model),
+        Simulation::Life => life(app, model),
+    }
+}
 
-    let since_start = app.duration.since_start.secs();
+fn emit(model: &Model) {
+    let collisions = get_collisions(&model.field);
+    for (i, e) in collisions.iter().enumerate() {
+        match e {
+            Some(_) => {
+                let (x, y) = index_to_pos(i as isize);
+                let channel = 0;
 
-    fn send_collisions(model: &Model) {
-        let collisions = get_collisions(&model.field);
-        for (i, e) in collisions.iter().enumerate() {
-            match e {
-                Some(_) => {
-                    let (x, y) = index_to_pos(i as isize);
-                    let channel = 0;
+                // simple emitter
+                // let note = x.checked_div(y).or(Some(0)).unwrap()
+                //     + x.checked_rem(y).or(Some(0)).unwrap()
+                //     + 64; // compensate? ;)
 
-                    let note = x.checked_div(y).or(Some(0)).unwrap()
-                        + x.checked_rem(y).or(Some(0)).unwrap()
-                        + 32; // compensate? ;)
+                let note = (x + y).checked_rem(128).or(Some(0)).unwrap();
+                println!("note = {}", note);
 
-                    println!("note = {}", note);
-
-                    let args = vec![Type::Int(channel), Type::Int(note as i32), Type::Float(1.0)];
-                    model.sender.send(("/midi/noteOn", args)).ok();
-                }
-                None => {}
+                let args = vec![Type::Int(channel), Type::Int(note as i32), Type::Float(1.0)];
+                model.sender.send(("/midi/noteOn", args)).ok();
             }
-        }
-    }
-
-    let delay = 0.5;
-
-    if model.last_send.is_none() {
-        model.last_send = Some(since_start);
-        send_collisions(model)
-    } else if let Some(last_send) = model.last_send {
-        if since_start - last_send > delay {
-            model.last_send = Some(since_start);
-            send_collisions(model)
+            None => {}
         }
     }
 }
@@ -129,6 +257,13 @@ fn view(app: &App, model: &Model, frame: Frame) {
     let draw = app.draw();
 
     draw.background().color(STEELBLUE);
+
+    // emit osc events
+    let frac = app.elapsed_frames() % 3;
+    if frac == 0 {
+        emit(model);
+    }
+    //
 
     model.field.iter().for_each(|cell| cell.draw(&draw.clone()));
 
@@ -139,7 +274,6 @@ fn view(app: &App, model: &Model, frame: Frame) {
 fn mover(app: &App, model: &mut Model) {
     if !model.initialized {
         set_cell_params(&mut model.field, 0, 0, Some(CellState::Enabled), None);
-        put_markers(&mut model.field);
         model.initialized = true;
     }
 
@@ -154,7 +288,7 @@ fn mover(app: &App, model: &mut Model) {
 
 fn rain(_app: &App, model: &mut Model) {
     if !model.initialized {
-        put_markers(&mut model.field);
+        clear_field(&mut model.field);
         model.initialized = true;
     }
 
@@ -195,11 +329,10 @@ fn life(app: &App, model: &mut Model) {
             let y = random_range(0, SIZE);
             set_cell_params(&mut model.field, x, y, Some(CellState::Enabled), None);
         }
-        put_markers(&mut model.field);
         model.initialized = true;
     }
 
-    let mut next_field = init_recs(model.window, Some(&model.field));
+    let mut next_field = init_recs(model.main_window_rect, Some(&model.field));
 
     for x in 0..SIZE {
         for y in 0..SIZE {
@@ -254,8 +387,10 @@ fn init_recs(window_rect: Rect, old_field: Option<&Vec<Cell>>) -> Vec<Cell> {
     field
 }
 
-fn put_markers(rects: &mut Vec<Cell>) {
+fn seed(rects: &mut Vec<Cell>) {
     let marked_count = SIZE * SIZE / 8;
+
+    rects.iter_mut().for_each(|c| c.marked = false);
 
     for _ in 0..marked_count {
         let x = random_range(0, SIZE);
