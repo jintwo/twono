@@ -1,6 +1,11 @@
-use nannou::geom::Rect;
+use std::time::Duration;
+
 use nannou::prelude::*;
 use nannou::rand::random_range;
+use nannou::ui::prelude::*;
+use nannou::{color::chromatic_adaptation::AdaptInto, geom::Rect};
+use nannou_osc as osc;
+use nannou_osc::Type;
 
 const SIZE: isize = 32;
 
@@ -55,6 +60,8 @@ struct Model {
     field: Vec<Cell>,
     window: Rect,
     initialized: bool,
+    sender: osc::Sender<osc::Connected>,
+    last_send: Option<f64>,
 }
 
 fn model(app: &App) -> Model {
@@ -62,6 +69,11 @@ fn model(app: &App) -> Model {
         field: init_recs(app.window_rect(), None),
         window: app.window_rect(),
         initialized: false,
+        sender: osc::sender()
+            .unwrap()
+            .connect("192.168.0.107:9001")
+            .unwrap(),
+        last_send: None,
     }
 }
 
@@ -75,6 +87,42 @@ fn update(app: &App, model: &mut Model, _update: Update) {
     // mover(app, model);
     // rain(app, model);
     life(app, model);
+
+    let since_start = app.duration.since_start.secs();
+
+    fn send_collisions(model: &Model) {
+        let collisions = get_collisions(&model.field);
+        for (i, e) in collisions.iter().enumerate() {
+            match e {
+                Some(_) => {
+                    let (x, y) = index_to_pos(i as isize);
+                    let channel = 0;
+
+                    let note = x.checked_div(y).or(Some(0)).unwrap()
+                        + x.checked_rem(y).or(Some(0)).unwrap()
+                        + 32; // compensate? ;)
+
+                    println!("note = {}", note);
+
+                    let args = vec![Type::Int(channel), Type::Int(note as i32), Type::Float(1.0)];
+                    model.sender.send(("/midi/noteOn", args)).ok();
+                }
+                None => {}
+            }
+        }
+    }
+
+    let delay = 0.5;
+
+    if model.last_send.is_none() {
+        model.last_send = Some(since_start);
+        send_collisions(model)
+    } else if let Some(last_send) = model.last_send {
+        if since_start - last_send > delay {
+            model.last_send = Some(since_start);
+            send_collisions(model)
+        }
+    }
 }
 
 fn view(app: &App, model: &Model, frame: Frame) {
@@ -214,6 +262,19 @@ fn put_markers(rects: &mut Vec<Cell>) {
         let y = random_range(0, SIZE);
         rects[pos_to_index((x, y)) as usize].marked = true;
     }
+}
+
+fn get_collisions(rects: &[Cell]) -> Vec<Option<Cell>> {
+    rects
+        .iter()
+        .map(|c| {
+            if matches!(c.state, CellState::Enabled) && c.marked {
+                Some(c.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn get_enabled_cells_indexes(rects: &[Cell]) -> Vec<isize> {
