@@ -1,9 +1,10 @@
-use nannou::geom::Rect;
 use nannou::prelude::*;
 use nannou::rand::random_range;
 use nannou::ui::prelude::*;
+use nannou::{geom::Rect, rand::prelude::SliceRandom};
 use nannou_osc as osc;
 use nannou_osc::Type;
+use rand::thread_rng;
 use std::fmt;
 
 const SIZE: isize = 32;
@@ -49,6 +50,7 @@ struct Cell {
     rect: Rect,
     state: CellState,
     marked: bool,
+    active: bool,
 }
 
 impl Cell {
@@ -172,6 +174,7 @@ fn ui_event(_app: &App, model: &mut Model, _event: WindowEvent) {
         .down_from(model.ids.title_label, 12.0)
         .w_h(100.0, 28.0)
         .label("Restart")
+        .label_font_size(16)
         .set(model.ids.restart_btn, ui)
     {
         model.initialized = false;
@@ -181,6 +184,7 @@ fn ui_event(_app: &App, model: &mut Model, _event: WindowEvent) {
         .right_from(model.ids.restart_btn, 12.0)
         .w_h(100.0, 28.0)
         .label("Reseed")
+        .label_font_size(16)
         .set(model.ids.reseed_btn, ui)
     {
         seed(&mut model.field);
@@ -227,28 +231,66 @@ fn update(app: &App, model: &mut Model, _update: Update) {
         Simulation::Mover => mover(app, model),
         Simulation::Life => life(app, model),
     }
+
+    // emit osc events
+    let frac = app.elapsed_frames() % 3;
+    match frac {
+        0 => emit(model),
+        2 => stop(model),
+        _ => {}
+    }
+    //
 }
 
-fn emit(model: &Model) {
+fn _note_by_cell_index(index: usize) -> i32 {
+    let (x, y) = index_to_pos(index as isize);
+
+    // simple emitter
+    // let note = x.checked_div(y).or(Some(0)).unwrap()
+    //     + x.checked_rem(y).or(Some(0)).unwrap()
+    //     + 64; // compensate? ;)
+
+    let note = (x + y).checked_rem(128).or(Some(0)).unwrap();
+    println!("note({}, {}) = {}", x, y, note);
+    note as i32
+}
+
+fn emit(model: &mut Model) {
     let collisions = get_collisions(&model.field);
-    for (i, e) in collisions.iter().enumerate() {
-        match e {
-            Some(_) => {
-                let (x, y) = index_to_pos(i as isize);
-                let channel = 0;
-
-                // simple emitter
-                // let note = x.checked_div(y).or(Some(0)).unwrap()
-                //     + x.checked_rem(y).or(Some(0)).unwrap()
-                //     + 64; // compensate? ;)
-
-                let note = (x + y).checked_rem(128).or(Some(0)).unwrap();
-                println!("note = {}", note);
-
-                let args = vec![Type::Int(channel), Type::Int(note as i32), Type::Float(1.0)];
-                model.sender.send(("/midi/noteOn", args)).ok();
+    let mut notes_buf = vec![];
+    for e in collisions.iter() {
+        match *e {
+            Some((i, _)) => {
+                model.field[i].active = true;
+                notes_buf.push(_note_by_cell_index(i));
             }
             None => {}
+        }
+    }
+
+    // note selection policy
+
+    let channel = 0;
+    // let mut rng = thread_rng();
+    // notes_buf.choose(&mut rng);
+    if let Some(note) = notes_buf.iter().max() {
+        let args = vec![
+            Type::Int(channel),
+            Type::Int(*note as i32),
+            Type::Float(1.0),
+        ];
+        model.sender.send(("/midi/noteOn", args)).ok();
+    }
+}
+
+fn stop(model: &mut Model) {
+    let channel = 0;
+    for (i, c) in model.field.iter_mut().enumerate() {
+        if c.active {
+            c.active = false;
+            let note = _note_by_cell_index(i);
+            let args = vec![Type::Int(channel), Type::Int(note), Type::Float(1.0)];
+            model.sender.send(("/midi/noteOff", args)).ok();
         }
     }
 }
@@ -258,13 +300,6 @@ fn view(app: &App, model: &Model, frame: Frame) {
 
     draw.background().color(STEELBLUE);
 
-    // emit osc events
-    let frac = app.elapsed_frames() % 3;
-    if frac == 0 {
-        emit(model);
-    }
-    //
-
     model.field.iter().for_each(|cell| cell.draw(&draw.clone()));
 
     draw.to_frame(app, &frame).unwrap();
@@ -273,7 +308,7 @@ fn view(app: &App, model: &Model, frame: Frame) {
 // simulations
 fn mover(app: &App, model: &mut Model) {
     if !model.initialized {
-        set_cell_params(&mut model.field, 0, 0, Some(CellState::Enabled), None);
+        set_cell_params(&mut model.field, 0, 0, Some(CellState::Enabled), None, None);
         model.initialized = true;
     }
 
@@ -282,8 +317,15 @@ fn mover(app: &App, model: &mut Model) {
     if px == x && py == y {
         return;
     }
-    set_cell_params(&mut model.field, px, py, Some(CellState::Disabled), None);
-    set_cell_params(&mut model.field, x, y, Some(CellState::Enabled), None);
+    set_cell_params(
+        &mut model.field,
+        px,
+        py,
+        Some(CellState::Disabled),
+        None,
+        None,
+    );
+    set_cell_params(&mut model.field, x, y, Some(CellState::Enabled), None, None);
 }
 
 fn rain(_app: &App, model: &mut Model) {
@@ -299,14 +341,21 @@ fn rain(_app: &App, model: &mut Model) {
     // add new drop
     if enabled_indexes.len() < (SIZE * 2) as usize {
         let x = random_range(0, SIZE);
-        set_cell_params(&mut model.field, x, 0, Some(CellState::Enabled), None);
+        set_cell_params(&mut model.field, x, 0, Some(CellState::Enabled), None, None);
     }
 
     // fall old drops
     for index in enabled_indexes {
         let (x, y) = index_to_pos(index);
         if y + 1 < SIZE {
-            set_cell_params(&mut model.field, x, y + 1, Some(CellState::Enabled), None)
+            set_cell_params(
+                &mut model.field,
+                x,
+                y + 1,
+                Some(CellState::Enabled),
+                None,
+                None,
+            )
         }
     }
 }
@@ -327,7 +376,7 @@ fn life(app: &App, model: &mut Model) {
         for _ in 0..SIZE * SIZE / 2 {
             let x = random_range(0, SIZE);
             let y = random_range(0, SIZE);
-            set_cell_params(&mut model.field, x, y, Some(CellState::Enabled), None);
+            set_cell_params(&mut model.field, x, y, Some(CellState::Enabled), None, None);
         }
         model.initialized = true;
     }
@@ -344,12 +393,28 @@ fn life(app: &App, model: &mut Model) {
 
             if is_alive {
                 match alive_neighbours {
-                    1 => set_cell_params(&mut next_field, x, y, Some(CellState::Disabled), None),
-                    2 | 3 => set_cell_params(&mut next_field, x, y, Some(CellState::Enabled), None),
-                    _ => set_cell_params(&mut next_field, x, y, Some(CellState::Disabled), None),
+                    1 => set_cell_params(
+                        &mut next_field,
+                        x,
+                        y,
+                        Some(CellState::Disabled),
+                        None,
+                        None,
+                    ),
+                    2 | 3 => {
+                        set_cell_params(&mut next_field, x, y, Some(CellState::Enabled), None, None)
+                    }
+                    _ => set_cell_params(
+                        &mut next_field,
+                        x,
+                        y,
+                        Some(CellState::Disabled),
+                        None,
+                        None,
+                    ),
                 }
             } else if alive_neighbours == 3 {
-                set_cell_params(&mut next_field, x, y, Some(CellState::Enabled), None)
+                set_cell_params(&mut next_field, x, y, Some(CellState::Enabled), None, None)
             }
         }
     }
@@ -380,6 +445,7 @@ fn init_recs(window_rect: Rect, old_field: Option<&Vec<Cell>>) -> Vec<Cell> {
                 rect,
                 state: CellState::Disabled,
                 marked: false,
+                active: false,
             });
         };
     }
@@ -399,12 +465,13 @@ fn seed(rects: &mut Vec<Cell>) {
     }
 }
 
-fn get_collisions(rects: &[Cell]) -> Vec<Option<Cell>> {
+fn get_collisions(rects: &[Cell]) -> Vec<Option<(usize, Cell)>> {
     rects
         .iter()
-        .map(|c| {
+        .enumerate()
+        .map(|(i, c)| {
             if matches!(c.state, CellState::Enabled) && c.marked {
-                Some(c.clone())
+                Some((i, c.clone()))
             } else {
                 None
             }
@@ -435,9 +502,10 @@ fn set_cells_params(
     positions: Vec<(isize, isize)>,
     state: Option<CellState>,
     marked: Option<bool>,
+    active: Option<bool>,
 ) {
     for (x, y) in positions.iter() {
-        set_cell_params(rects, *x, *y, state, marked)
+        set_cell_params(rects, *x, *y, state, marked, active)
     }
 }
 
@@ -484,6 +552,7 @@ fn set_cell_params(
     y: isize,
     state: Option<CellState>,
     marked: Option<bool>,
+    active: Option<bool>,
 ) {
     let index = pos_to_index((x, y)) as usize;
     let cell = rects[index];
@@ -497,10 +566,16 @@ fn set_cell_params(
         None => cell.marked,
     };
 
+    let new_active = match active {
+        Some(a) => a,
+        None => cell.active,
+    };
+
     rects[index] = Cell {
         rect,
         state: new_state,
         marked: new_marked,
+        active: new_active,
     };
 }
 
