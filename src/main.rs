@@ -1,20 +1,42 @@
+use nannou::geom::Rect;
 use nannou::prelude::*;
 use nannou::rand::random_range;
 use nannou::ui::prelude::*;
-use nannou::{geom::Rect, rand::prelude::SliceRandom};
 use nannou_osc as osc;
 use nannou_osc::Type;
+use rand::seq::SliceRandom;
 use rand::thread_rng;
 use std::fmt;
 
 const SIZE: isize = 32;
 const HEIGHT: u32 = SIZE as u32 * 2 * 10;
 const WIDTH: u32 = SIZE as u32 * 2 * 10;
+const CHANNEL: i32 = 0;
 
 static SIMULATIONS: &[Simulation] = &[Simulation::Mover, Simulation::Rain, Simulation::Life];
+static NOTE_POLICIES: &[NotePolicy] = &[
+    NotePolicy::Min,
+    NotePolicy::Max,
+    NotePolicy::Avg,
+    NotePolicy::Random,
+];
 
 fn main() {
     nannou::app(model).update(update).run();
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum NotePolicy {
+    Min,
+    Max,
+    Avg,
+    Random,
+}
+
+impl fmt::Display for NotePolicy {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -71,6 +93,17 @@ impl Cell {
                 .pad_bottom(pad);
             draw.rect().xy(rect2.xy()).wh(rect2.wh()).color(YELLOW);
         }
+
+        if self.active {
+            let pad = rect.h() * 0.2;
+            let rect2 = rect
+                .pad_left(pad)
+                .pad_right(pad)
+                .pad_top(pad)
+                .pad_bottom(pad);
+
+            draw.rect().xy(rect2.xy()).wh(rect2.wh()).color(RED);
+        }
     }
 }
 
@@ -81,6 +114,8 @@ widget_ids! {
         reseed_btn,
         simulation_label,
         simulation_combo,
+        note_label,
+        note_combo
     }
 }
 
@@ -94,6 +129,7 @@ struct Model {
     ids: Ids,
     ui: Ui,
     simulation: Simulation,
+    note_policy: NotePolicy,
 }
 
 fn model(app: &App) -> Model {
@@ -108,7 +144,7 @@ fn model(app: &App) -> Model {
     let ui_window = app
         .new_window()
         .title(app.exe_name().unwrap() + " controls")
-        .size(300, 200)
+        .size(250, 260)
         .view(ui_view)
         .event(ui_event)
         .build()
@@ -137,6 +173,7 @@ fn model(app: &App) -> Model {
         ui: ui,
         text: "".to_string(),
         simulation: Simulation::Life,
+        note_policy: NotePolicy::Min,
     };
 
     ui_event(&app, &mut model, WindowEvent::Focused);
@@ -207,8 +244,8 @@ fn ui_event(_app: &App, model: &mut Model, _event: WindowEvent) {
         SIMULATIONS
             .iter()
             .enumerate()
-            .find(|&(i, e)| *e == *current_sim)
-            .map(|(i, e)| i),
+            .find(|&(_, e)| *e == *current_sim)
+            .map(|(i, _)| i),
     )
     .right_from(model.ids.simulation_label, 12.0)
     .w_h(100.0, 28.0)
@@ -216,6 +253,34 @@ fn ui_event(_app: &App, model: &mut Model, _event: WindowEvent) {
     .set(model.ids.simulation_combo, ui)
     {
         model.simulation = SIMULATIONS[event];
+    }
+
+    widget::Text::new("Note policy")
+        .down_from(model.ids.simulation_label, 12.0)
+        .w_h(100.0, 24.0)
+        .font_size(16)
+        .set(model.ids.note_label, ui);
+
+    let current_note_policy = &model.note_policy;
+
+    for event in widget::DropDownList::new(
+        NOTE_POLICIES
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<String>>()
+            .as_slice(),
+        NOTE_POLICIES
+            .iter()
+            .enumerate()
+            .find(|&(_, e)| *e == *current_note_policy)
+            .map(|(i, _)| i),
+    )
+    .right_from(model.ids.note_label, 12.0)
+    .w_h(100.0, 28.0)
+    .label_font_size(16)
+    .set(model.ids.note_combo, ui)
+    {
+        model.note_policy = NOTE_POLICIES[event];
     }
 }
 
@@ -233,15 +298,16 @@ fn update(app: &App, model: &mut Model, _update: Update) {
     }
 
     // emit osc events
-    let frac = app.elapsed_frames() % 3;
+    let frac = app.elapsed_frames() % 10;
     match frac {
         0 => emit(model),
-        2 => stop(model),
+        9 => stop(model),
         _ => {}
     }
     //
 }
 
+// INFO: note generating policy
 fn _note_by_cell_index(index: usize) -> i32 {
     let (x, y) = index_to_pos(index as isize);
 
@@ -255,41 +321,99 @@ fn _note_by_cell_index(index: usize) -> i32 {
     note as i32
 }
 
-fn emit(model: &mut Model) {
-    let collisions = get_collisions(&model.field);
-    let mut notes_buf = vec![];
-    for e in collisions.iter() {
-        match *e {
-            Some((i, _)) => {
-                model.field[i].active = true;
-                notes_buf.push(_note_by_cell_index(i));
-            }
-            None => {}
+fn _note_with_max_index(indices: &[usize], model: &mut Model) {
+    if let Some(index) = indices.iter().max() {
+        let mut cell = model.field.get_mut(*index as usize).unwrap();
+
+        if cell.active {
+            return;
         }
-    }
 
-    // note selection policy
+        (*cell).active = true;
 
-    let channel = 0;
-    // let mut rng = thread_rng();
-    // notes_buf.choose(&mut rng);
-    if let Some(note) = notes_buf.iter().max() {
-        let args = vec![
-            Type::Int(channel),
-            Type::Int(*note as i32),
-            Type::Float(1.0),
-        ];
+        let note = _note_by_cell_index(*index) as i32;
+        let args = vec![Type::Int(CHANNEL), Type::Int(note as i32), Type::Float(1.0)];
         model.sender.send(("/midi/noteOn", args)).ok();
     }
 }
 
+fn _note_with_min_index(indices: &[usize], model: &mut Model) {
+    if let Some(index) = indices.iter().min() {
+        let mut cell = model.field.get_mut(*index as usize).unwrap();
+
+        if cell.active {
+            return;
+        }
+
+        (*cell).active = true;
+
+        let note = _note_by_cell_index(*index) as i32;
+        let args = vec![Type::Int(CHANNEL), Type::Int(note as i32), Type::Float(1.0)];
+        model.sender.send(("/midi/noteOn", args)).ok();
+    }
+}
+
+fn _note_with_avg_index(indices: &[usize], model: &mut Model) {
+    if indices.is_empty() {
+        return;
+    }
+
+    let index: usize = indices.iter().sum::<usize>() / indices.len();
+    println!("index = {}", index);
+
+    let mut cell = model.field.get_mut(index).unwrap();
+
+    if cell.active {
+        return;
+    }
+
+    (*cell).active = true;
+
+    let note = _note_by_cell_index(index) as i32;
+    let args = vec![Type::Int(CHANNEL), Type::Int(note as i32), Type::Float(1.0)];
+    model.sender.send(("/midi/noteOn", args)).ok();
+}
+
+fn _note_with_random_index(indices: &[usize], model: &mut Model) {
+    let mut rng = thread_rng();
+    if let Some(index) = indices.choose(&mut rng) {
+        let mut cell = model.field.get_mut(*index as usize).unwrap();
+
+        if cell.active {
+            return;
+        }
+
+        (*cell).active = true;
+
+        let note = _note_by_cell_index(*index) as i32;
+        let args = vec![Type::Int(CHANNEL), Type::Int(note as i32), Type::Float(1.0)];
+        model.sender.send(("/midi/noteOn", args)).ok();
+    }
+}
+
+fn emit(model: &mut Model) {
+    let collisions = get_collisions(&model.field);
+    let mut indices = vec![];
+    for e in collisions.iter() {
+        if let Some((i, _)) = *e {
+            indices.push(i)
+        }
+    }
+
+    match model.note_policy {
+        NotePolicy::Min => _note_with_min_index(&indices, model),
+        NotePolicy::Max => _note_with_max_index(&indices, model),
+        NotePolicy::Avg => _note_with_avg_index(&indices, model),
+        NotePolicy::Random => _note_with_random_index(&indices, model),
+    };
+}
+
 fn stop(model: &mut Model) {
-    let channel = 0;
     for (i, c) in model.field.iter_mut().enumerate() {
         if c.active {
             c.active = false;
             let note = _note_by_cell_index(i);
-            let args = vec![Type::Int(channel), Type::Int(note), Type::Float(1.0)];
+            let args = vec![Type::Int(CHANNEL), Type::Int(note), Type::Float(1.0)];
             model.sender.send(("/midi/noteOff", args)).ok();
         }
     }
@@ -579,7 +703,7 @@ fn set_cell_params(
     };
 }
 
-// INFO: 4 fps
+// TODO: use app.elapsed_frames
 fn get_frame(app: &App) -> isize {
     (app.duration.since_start.as_secs_f64() * 4.0) as isize
 }
